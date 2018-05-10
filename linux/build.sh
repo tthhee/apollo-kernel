@@ -6,6 +6,22 @@
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "${DIR}"
 
+#get original linux kernel
+function get_kernel() { 
+  kernel_version="4.4.32"
+  loadkernel_address="http://cdn.kernel.org/pub/linux/kernel/v4.x/linux-${kernel_version}.tar.xz"
+  if [ -e ./Makefile ]
+  then
+	return
+  fi
+
+  /bin/rm -rf ./linux-${kernel_version}*
+  info "Downloading linux kernel code from ${loadkernel_address}..." 
+  wget ${loadkernel_address} 1>/dev/null 2>&1 
+  tar -xvf linux-${kernel_version}.tar.xz 1>/dev/null 2>&1
+  rsync -a linux-${kernel_version}/* ${DIR}/
+ }
+
 START_TIME=$(($(date +%s%N)/1000000))
 TIME=$(date  +%Y%m%d_%H%M)
 
@@ -64,6 +80,8 @@ function fail() {
   print_delim
   exit -1
 }
+
+get_kernel
 
 _VERSION=`grep "VERSION =" Makefile |awk -F " " '{if ($1=="VERSION") print $3;}'`
 _PATCHLEVEL=`grep "PATCHLEVEL =" Makefile | awk -F " " '{if ($1=="PATCHLEVEL") print$3;}'`
@@ -132,6 +150,15 @@ function kernel_cleanall() {
 }
 
 function kernel_patch() {
+    # patch pre_rt.patch
+    grep '#res' scripts/setlocalversion > /dev/null
+    if [ $? -ne 0 ]; then
+        k_patch patches/pre_rt.patch
+    fi
+    # patch esdcan
+    if [ ! -d drivers/esdcan ]; then
+        k_patch patches/esdcan.patch
+    fi
     # patch e1000e.patch
     grep E1000_DEV_ID_PCH_LBG_I219_LM3 drivers/net/ethernet/intel/e1000e/hw.h > /dev/null
     if [ $? -ne 0 ]; then
@@ -246,12 +273,23 @@ function kernel_build() {
     cp arch/x86/boot/bzImage ${INSTALL_PATH}/vmlinuz-${_KERNEL_VERSION}
     cp System.map ${INSTALL_PATH}/System.map-${_KERNEL_VERSION}
     cp .config ${INSTALL_PATH}/config-${_KERNEL_VERSION}
-    cp install_kernel.sh ${INSTALL_PATH}
+    cp install*.sh ${INSTALL_PATH}
+
+    # build header
+    # TODO to replace with an elegant method
+    rsync -a scripts ${INSTALL_PATH}/linux-headers-${_KERNEL_VERSION}/
+    rsync -a arch block certs crypto Documentation drivers firmware fs include init ipc Kbuild Kconfig kernel lib Makefile mm modules.builtin modules.order Module.symvers net samples security sound System.map tools usr virt ${INSTALL_PATH}/linux-headers-${_KERNEL_VERSION}/ --exclude=*.c --exclude=*.ko --exclude=*.o --exclude=.git* --exclude=*.dts* --exclude=*.S --exclude=*.txt --exclude=*o.cmd
+    for i in `find ${INSTALL_PATH}/linux-headers-${_KERNEL_VERSION}/ -type f|grep -v Kconfig|grep -v Makefile|grep -v Kbuild|grep -v pl |grep -v include|grep -v .sh|grep -v scripts|grep -v arch|grep -v Module|grep -v module |grep -v .config |grep -v System.map |grep -v .vmlinux.cmd |grep -v .version`; do rm -rf $i; done
 
     cd ${INSTALL_PATH}
     depmod -a -b . -w ${_KERNEL_VERSION}
 
     mv lib/* . && rm -r lib
+    # remove source link
+    rm -f modules/${_KERNEL_VERSION}/source
+    rm -f modules/${_KERNEL_VERSION}/build
+    ln -s /usr/src/linux-headers-${_KERNEL_VERSION} modules/${_KERNEL_VERSION}/build
+
     mkdir install
     mv * install
     for i in `find install -name "*.ko" `; do strip --strip-unneeded $i; done
@@ -306,7 +344,6 @@ case $1 in
     print_usage
     ;;
   *)
-    kernel_clean
     kernel_patch
     prepare_nonrt
     kernel_build
